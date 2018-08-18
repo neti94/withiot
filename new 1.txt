@@ -1,0 +1,523 @@
+// HidroponicoCole_v5.8 ไม่มีคีย์
+//
+// bluetooht RX3-TX3
+// DALLAS pin 3
+// ขา DHT 2
+// ปั้มน้ำ pin 6
+// แสงพิน 7
+//  ESP 8266 พร้อมคำสั่ง AT
+// ใช้ไลบรารี TimeLib สำหรับวันที่และเวลา
+// ส่งข้อมูลทุก 15 นาที
+// จอแอลซีดีที่มี ALARMS
+// Invert ปั๊มและเอาท์พุทแสง 0 = ใช้งาน, 1 = ไม่ใช้งาน
+// ------------------------------------------------ -----------
+
+#define DEBUG 0                                // change value to 1 to enable debuging using serial monitor  
+String network = "SSID NAME";                  // your access point SSID
+String password = "PASSWORD";                  // your wifi Access Point password
+#define IP "184.106.153.149"                   // IP address of thingspeak.com  184.106.153.149
+String GET = "GET /update?key=CHANNEL_KEY";    // replace with your channel key
+
+
+#include "OpenGarden.h"
+#include <DHT.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <LiquidCrystal.h>
+#include <TimeLib.h>
+
+// เริ่มต้นไลบรารีโดยเชื่อมโยงกับพินอินเตอร์เฟซ LCD ที่จำเป็น
+// ด้วยหมายเลขหมายเลข arduino ที่เชื่อมต่ออยู่
+const int rs = 51, en = 53, d4 = 39, d5 = 37, d6 = 35, d7 = 33;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+
+// ตั้งค่าเริ่มต้นวันที่และเวลา
+int hour = 9;
+int minute = 0;
+int second = 0;
+int day = 1;
+int month = 1;
+int year = 17;
+
+bool newSecond;
+int oldSecond = 0;
+
+bool newMinute;
+int oldMinute = 0;
+
+bool newHour;
+int oldHour = 0;
+
+
+// ตัวแปรโทรเลขที่ได้รับจาก bluethooh
+// ส่วนหัว body1 body2 body3 ท้าย
+int head = 0;
+int body1 = 0;
+int body2 = 0;
+int body3 = 0;
+int End = 0;
+
+// เซ็นเซอร์ PH และ EC
+#define calibration_point_4 2246     // เขียนค่าที่วัดได้ของคุณเป็น mV ที่ pH 4
+#define calibration_point_7 2080    // เขียนค่าที่วัดได้ของคุณเป็น mV ที่ pH 7
+#define calibration_point_10 1894  // เขียนค่าที่วัดได้ของคุณใน mV ที่ pH 10
+#define point_1_cond 40000         // เขียนที่นี่ค่าการปรับเทียบมาตรฐานของ EC ของโซลูชัน 1 ในμS / cm
+#define point_1_cal 40           // เขียนค่า EC ของคุณวัดความต้านทานด้วยโซลูชัน 1
+#define point_2_cond 10500      // เขียนที่นี่ค่าการปรับเทียบค่า EC ของโซลูชัน 2 ในμS / cm
+#define point_2_cal 120          // เขียนค่า EC ของคุณวัดความต้านทานด้วยโซลูชัน 2
+
+/* SENSOR DHT22 (AIR) */
+#define DHTPIN 2
+#define DHTTYPE DHT22
+
+float TemperatureAir;
+float HumedityAir;
+DHT dht(DHTPIN, DHTTYPE);
+
+
+
+/*   SENSOR อุณหภูมิ DALLAS (อุณหภูมิน้ำ) */
+#define ONE_WIRE_BUS 3
+OneWire oneWireBus (ONE_WIRE_BUS);
+DallasTemperature sensors (&oneWireBus);
+float TemperatureWater;
+
+
+/* PUMP และ LIGHT */
+#define PinPump 6  // ปั้มน้ำขา 6
+#define PinLight 7        // แสงขา 7
+#define Amanece 8      // เวลาสว่าง
+#define Anochece 20    // เวลาปิด
+#define MinutePump 20   
+bool Pump = 0;   
+bool Light = 0;        
+
+// ค่าของ สัญญาณเตือน
+#define PhHigh 10          // ค่า PH สุง
+#define PhLow 5           // ค่า PH ต่ำ
+#define EcHigh 3000        // ค่า EC สูง
+#define EcLow 900         // ค่า EC ต่ำ
+
+
+// ค่า Ec ต่ำมาก "ขาดน้ำ" ไม่อนุญาตให้ดำเนินการปั๊ม
+#define EcVeryLow 200
+#define TempWaterHigh 40    
+#define TempWaterLow 5     
+int AlarmaPH;        
+int AlarmaTempWater;   
+int AlarmaEC;        
+
+float pH;
+float EC;
+
+
+void setup() {
+  lcd.begin(16, 2);                 // เริ่ม LCD 16 ตัวอักษร 2 แถว
+  
+// ข้อความเริ่มต้นของ LCD
+ printLCD();
+  lcd.setCursor(0, 0);              // ตำแหน่งบรรทัดเคอร์เซอร์ 0, คอลัมน์ 0
+  lcd.print("INICIANDO");
+  lcd.setCursor(0, 1);
+  lcd.print("ESPERE .....");
+
+  setupEsp8266();                    // เริ่มต้นการเชื่อมต่อ WiFi
+  pinMode(PinPump, OUTPUT);
+  pinMode(PinLight, OUTPUT);
+
+  Serial3.begin(9600);
+  Serial.begin(115200);
+
+// ตั้งวันที่และเวลาเมื่อเริ่มต้น
+  setTime(hour, minute, second, day, month, year);
+
+  // Start up the libraries
+  sensors.begin(); // DALLAS
+  dht.begin(); // DHT
+
+  OpenGarden.initSensors(); //Initialize sensors power
+  OpenGarden.sensorPowerON();//Turn On the sensors
+  OpenGarden.calibratepH(calibration_point_4, calibration_point_7, calibration_point_10);
+  OpenGarden.calibrateEC(point_1_cond, point_1_cal, point_2_cond, point_2_cal);
+  delay(500);
+}
+
+void loop() {
+
+  // Read DALLAS
+  // เรียก sensors.request Temperatures () เพื่อออกอุณหภูมิส่วนกลาง
+  // ร้องขอไปยังอุปกรณ์ทั้งหมดบนรถบัส
+  sensors.requestTemperatures(); // Send the command to get temperatures
+  TemperatureWater = (sensors.getTempCByIndex(0)); // Why "byIndex"?
+ 
+// คุณสามารถมี IC ได้มากกว่าหนึ่งเครื่องบนรถบัสเดียวกัน
+  // 0 หมายถึง IC ตัวแรกบนสายไฟ
+  // อ่าน DHT 22
+  HumedityAir = dht.readHumidity();
+  TemperatureAir = dht.readTemperature();
+
+
+  //Read the pH sensor
+  int mvpH = OpenGarden.readpH(); //Value in mV of pH
+  pH = OpenGarden.pHConversion(mvpH); //Calculate pH value
+  if ( pH < 0 || pH > 14) {
+    pH = 0 ;
+  }
+
+  //Read the conductivity sensor in µS/cm
+  float resistanceEC = OpenGarden.readResistanceEC(); //EC Value in resistance
+  EC = OpenGarden.ECConversion(resistanceEC); //EC Value in µS/cm
+
+ // สัญญาณเตือนภัยข้อมูลน้ำ
+  AlarmaPH = 0;  // Resetea el valor de la alarma Ph
+  if ( pH > PhHigh ) {
+    AlarmaPH = 2 ;
+  }
+  if ( pH < PhLow ) {
+    AlarmaPH = 1 ;
+  }
+
+  AlarmaTempWater = 0;  // รีเซ็ตค่าของการเตือนภัยน้ำ Temp
+  if ( TemperatureHigh > TempWaterHigh ) {
+    AlarmaTempHigh = 2 ;
+  }
+  if ( TemperatureHigh < TempWaterLow ) {
+    AlarmaTempHigh = 1 ;
+  }
+
+  AlarmaEC = 0;  // รีเซ็ตค่าของการเตือน EC
+  if ( EC > EcHigh ) {
+    AlarmaEC = 2 ;
+  }
+  if ( EC < EcLow  ) {
+    AlarmaEC = 1 ;
+  }
+  if ( EC < EcVeryLow ) {
+    AlarmaEC = 3 ;
+  }
+
+// สร้างและส่งไปที่ ESP 8266 //
+  if (OldMinute != minute()) {
+    newMinute = true;
+    OldMinute = minute();
+  } else {
+     newMinute = false;
+  }
+
+  if (minute() % 15 == 0 && newMinute) {    // 5 = ทุกๆ 5 นาที 15 = ทุก 15 นาที
+    updateTemp(String(pH) , String(EC), String(TemperatureHigh), String(TemperatureAir), String(HumedityAir));
+  }
+
+  
+// ตรวจสอบการรับข้อมูลจากบลูทูธ
+  if (Serial3.available () > 10) {
+    head = Serial3.parseInt ();
+    body1 = Serial3.parseInt ();
+    body2 = Serial3.parseInt ();
+    body3 = Serial3.parseInt ();
+    End = Serial3.parseInt ();
+    String basura = Serial3.readString(); // ว่าง buffer อ่าน
+  }
+
+  if (head == fin && head == 20) {   // if header = end = 20 update hour
+    setTime(body1, body2, body3, day, month, year);
+    head = 0; // ลบส่วนหัวและท้ายเพื่อไม่ให้ทำซ้ำ
+    End = 0;
+  }
+// ส่งข้อมูลผ่านบลูทูธ
+  Serial3.print("<");
+  Serial3.print(pH);
+  Serial3.print(", ");
+  Serial3.print(EC);
+  Serial3.print(", ");
+  Serial3.print(TemperatureWater);
+  Serial3.print(", ");
+  Serial3.print(HumedadityAir);
+  Serial3.print(", ");
+  Serial3.print(TemperatureAir);
+  Serial3.print(", ");
+  Serial3.print(hour());  
+  Serial3.print(", ");
+  Serial3.print(minute()); 
+  Serial3.print(", ");
+  Serial3.print(second()); 
+  Serial3.print(", ");
+  Serial3.print(Pump); 
+  Serial3.print(", ");
+  Serial3.print(Light); 
+  Serial3.print(">");
+
+  
+// ควบคุมปั๊มน้ำทุกๆนาที //
+  if (minute() < minutePump  && EC > EcVeryLow) {    // EC ต่ำมากหมายถึงการรดน้ำขาดน้ำ
+    digitalWrite (PinPump, LOW);  // LOW = ปั๊มติด
+    Pump = 1;
+  }
+  else {
+    digitalWrite (PinPump, HIGH);  // HIGH = ปั้มดับ
+    Pump = 0;
+  }
+
+  
+// ควบคุมแสงจาก Sunrise ถึง Nightfall
+  if (hour() > Amanece && hour() < Anochece) {
+    digitalWrite (PinLight, LOW);          // LOW = แสงสว่าง
+    Light = 1;
+  }
+  else {
+    digitalWrite (PinLight, HIGH);          // HIGH = แสงดับ
+    Light = 0;
+  }
+
+  // refresh LCD ทุกวินาที
+  if (oldSecond != second()) {
+    newSecond = true;
+    oldSecond = second();
+  } else {
+    newSecond = false;
+  }
+
+  if (newSecond == true) {
+    show ();
+  }
+
+}
+
+//-------------------------------------------------------------------
+//หลังจากติดตั้งฟังก์ชั่น esp8266 ใส่ไว้ในโหมดสถานีและ
+// เชื่อมต่อกับจุดเข้าใช้ wifi
+//------------------------------------------------------------------
+void setupEsp8266()
+{
+  if (DEBUG) {
+    //Serial3.println("Reseting esp8266");
+  }
+  Serial.flush();
+  Serial.println(F("AT+RST"));
+  delay(7000);
+
+
+  if (Serial.find("OK"))
+  {
+    if (DEBUG) {
+      Serial3.println("Found OK");
+      Serial3.println("Changing espmode");
+    }
+    Serial.flush();
+    changingMode();
+    delay(5000);
+    Serial.flush();
+    connectToWiFi();
+  }
+  else
+  {
+    if (DEBUG) {
+      Serial3.println("OK not found");
+    }
+  }
+}
+
+//-------------------------------------------------------------------
+// ฟังก์ชันต่อไปนี้ตั้งค่า esp8266 เป็นโหมดสถานี
+//-------------------------------------------------------------------
+bool changingMode()
+{
+  Serial.println(F("AT+CWMODE=1"));
+  if (Serial.find("OK"))
+  {
+    if (DEBUG) {
+      Serial3.println("Mode changed");
+    }
+    return true;
+  }
+  else if (Serial.find("NO CHANGE")) {
+    if (DEBUG) {
+      Serial3.println("Already in mode 1");
+    }
+    return true;
+  }
+  else
+  {
+    if (DEBUG) {
+      Serial3.println("Error while changing mode");
+    }
+    return false;
+  }
+}
+
+//-------------------------------------------------------------------
+// ฟังก์ชั่นต่อไปนี้เชื่อมต่อ esp8266 เข้ากับจุดเข้าใช้ wifi
+//-------------------------------------------------------------------
+bool connectToWiFi()
+{
+  if (DEBUG) {
+    Serial3.println("inside connectToWiFi");
+  }
+  String cmd = F("AT+CWJAP=\"");
+  cmd += network;
+  cmd += F("\",\"");
+  cmd += password;
+  cmd += F("\"");
+  Serial.println(cmd);
+  delay(15000);
+
+  if (Serial.find("OK"))
+  {
+    if (DEBUG) {
+      Serial3.println("Connected to Access Point");
+    }
+    return true;
+  }
+  else
+  {
+    if (DEBUG) {
+      Serial3.println("Could not connect to Access Point");
+    }
+    return false;
+  }
+}
+
+//-------------------------------------------------------------------
+// ฟังก์ชันต่อไปนี้จะส่งข้อมูลเซ็นเซอร์ไปที่ thingspeak.com
+//-------------------------------------------------------------------
+void updateTemp(String valor1, String valor2, String valor3, String valor4, String valor5)
+{
+  String cmd = "AT+CIPSTART=\"TCP\",\"";
+  cmd += IP;
+  cmd += "\",80";
+  Serial.println(cmd);
+  if (DEBUG) {
+    Serial3.println (cmd);
+  }
+
+  delay(5000);
+  if (Serial.find("Error")) {
+    if (DEBUG) {
+      Serial3.println("ERROR while SENDING");
+    }
+    return;
+  }
+  cmd = GET + "&field1=" + valor1 + "&field2=" + valor2 + "&field3=" + valor3 + "&field4=" + valor4 + "&field5=" + valor5 + "\r\n";
+  if (DEBUG) {
+    Serial3.println (valor1);
+    Serial3.println (valor2);
+    Serial3.println (valor3);
+    Serial3.println (valor4);
+    Serial3.println (valor5);
+    Serial3.println (cmd);
+  }
+
+
+  Serial.print("AT+CIPSEND=");
+  Serial.println(cmd.length());
+  delay(15000);
+  if (Serial.find(">"))
+  {
+    Serial.print(cmd);
+    if (DEBUG) {
+      Serial3.println("Data sent");
+    }
+  } else
+  {
+    Serial.println("AT+CIPCLOSE");
+    if (DEBUG) {
+      Serial3.println("Connection closed");
+    }
+  }
+}
+
+// -------------------------------------////////////////////////////////////////////////////////////////////
+// ย้ายข้อมูล LCD
+// -------------------------------------
+void show () {
+
+// แสดงวันที่และเวลา
+  if (second() % 30 >= 0 && second() % 30 < 7) {
+    borrarLCD();
+    lcd.setCursor(0, 0); // ตำแหน่งบรรทัดเคอร์เซอร์ 0, คอลัมน์ 0
+    lcd.print("HORA ACTUAL");
+
+
+    lcd.setCursor(0, 1);
+    lcd.print(format(hour()));
+    lcd.print(":");
+    lcd.print(format(minute()));
+    lcd.print(":");
+    lcd.print(format(second()));
+  }
+
+  // display WATER data
+  if (second() % 30 >= 7 && second() % 30 < 14) {
+    borrarLCD();
+    lcd.setCursor(0, 0); // ตำแหน่งบรรทัดเคอร์เซอร์ 0, คอลัมน์ 0
+    lcd.print("WATER: ");
+    lcd.print((int)EC);
+    lcd.print(" uS/cm");
+
+    lcd.setCursor(0, 1);
+    lcd.print("pH=");
+    lcd.print(pH);
+    lcd.print("; ");
+    lcd.print(TemperatureWater);
+    lcd.print(" C");
+
+  }
+
+  // ข้อมูล air
+  if (second() % 30 >= 14 && second() % 30 < 21) {
+    borrarLCD();
+    lcd.setCursor(0, 0); // ตำแหน่งบรรทัดเคอร์เซอร์ 0, คอลัมน์ 0
+    lcd.print("    AIRE ");
+
+    lcd.setCursor(0, 1); // ตำแหน่งบรรทัดเคอร์เซอร์ 0, คอลัมน์ 1
+    lcd.print((int)TemperatureAir);
+    lcd.print(" C  ;  ");
+    lcd.print((int)HumedityAir);
+    lcd.print("%");
+
+  }
+
+  // แสดงการแจ้งเตือน
+  if (second() % 30 >= 21 && second() % 30 < 30) {
+    borrarLCD();
+    lcd.setCursor(0, 0); // ตำแหน่งบรรทัดเคอร์เซอร์ 0, คอลัมน์ 0
+    lcd.print("   ALARMAS ");
+
+    lcd.setCursor(0, 1); // ตำแหน่งบรรทัดเคอร์เซอร์ 0, คอลัมน์ 1
+    if (AlarmaPH == 0 && AlarmaTempWater == 0 && AlarmaEC == 0) {   // ตรวจสอบการเตือนภัย
+      lcd.print("NO HAY ALARMAS");
+    }
+    else {
+      if (AlarmaPH > 0) {
+        lcd.print("pH;");
+      }
+      if (AlarmaTempWater > 0) {
+        lcd.print("Temp Water;");
+      }
+      if (AlarmaEC > 0 && AlarmaEC < 3 ) {
+        lcd.print("EC");
+      }
+      if (AlarmaEC == 3 ) {
+        lcd.print("No Water");
+      }
+    }
+  }
+}
+
+void borrarLCD() {
+  lcd.setCursor(0, 0);
+  lcd.print("                ");
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+}
+
+String format(int info) {
+  String infoEditada;
+  if (info < 10) {
+    infoEditada += 0;
+  }
+  infoEditada += info;
+
+  return infoEditada;
+}
